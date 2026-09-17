@@ -1,0 +1,73 @@
+name: Build & Release Linux ARM64 Natives
+
+on:
+  workflow_dispatch:
+    inputs:
+      imgui_java_version:
+        description: 'imgui-java tag to build (e.g. v1.92.7.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-arm64:
+    name: Build linux-arm64 libimgui-java64.so
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout SpaiR/imgui-java
+        uses: actions/checkout@v4
+        with:
+          repository: SpaiR/imgui-java
+          ref: ${{ inputs.imgui_java_version }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install compiler toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile Java bindings & generate JNI headers
+        run: ./gradlew :imgui-binding:compileJava
+
+      - name: Build native library
+        run: ./gradlew :imgui-binding:generateLibs -Denvs=linux -Dlocal
+
+      - name: Locate and verify output
+        id: locate
+        run: |
+          SO_PATH=$(find . -name 'libimgui-java64.so' -path '*linux64*' | head -n1)
+          if [ -z "$SO_PATH" ]; then
+            echo "libimgui-java64.so not found under any linux64 build output directory" >&2
+            find . -name 'libimgui-java64.so' >&2 || true
+            exit 1
+          fi
+          file "$SO_PATH" | tee /dev/stderr | grep -q 'ARM aarch64' || {
+            echo "Output is not an ARM64 ELF binary" >&2
+            exit 1
+          }
+          mkdir -p dist
+          cp "$SO_PATH" "dist/libimgui-java64-linux-arm64-${{ inputs.imgui_java_version }}.so"
+          echo "asset=dist/libimgui-java64-linux-arm64-${{ inputs.imgui_java_version }}.so" >> "$GITHUB_OUTPUT"
+
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.imgui_java_version }}
+          name: imgui-java ${{ inputs.imgui_java_version }} — linux-arm64
+          body: |
+            Native `libimgui-java64.so` for `io.github.spair:imgui-java` `${{ inputs.imgui_java_version }}`,
+            cross-compiled on a native `ubuntu-24.04-arm` GitHub-hosted runner.
+
+            Upstream does not publish Linux ARM64 natives (see
+            [SpaiR/imgui-java#105](https://github.com/SpaiR/imgui-java/issues/105)).
+            See this repo's README for integration instructions.
+          files: ${{ steps.locate.outputs.asset }}
