@@ -38,6 +38,47 @@ jobs:
       - name: Compile Java bindings & generate JNI headers
         run: ./gradlew :imgui-binding:compileJava
 
+      # gdx-jnigen's GenerateLibs task always builds the Linux target as
+      # Architecture.x86 (the newDefaultTarget(Os, Bitness) overload defaults
+      # to x86), which bakes in x86-only flags (-mfpmath=sse -msse -m64) that
+      # a native aarch64 g++ rejects outright. gdx-jnigen 2.5.2 already ships
+      # a correct Linux ARM64 target (aarch64-linux-gnu- prefix, -fPIC, no SSE
+      # flags) via newDefaultTarget(Os.Linux, Bitness._64, Architecture.ARM) —
+      # imgui-java's build script just never selects it. Swap it in, and pin
+      # the resulting file/folder names back to the "linux64" ones the rest
+      # of GenerateLibs.groovy hardcodes downstream (checkLibExist, the
+      # build-linux64.xml ant invocation), since Architecture.ARM otherwise
+      # shifts them to "linuxarm64". Since this runner is natively aarch64
+      # (not cross-compiling), the cross-toolchain compilerPrefix is cleared
+      # so it invokes the system g++ directly.
+      - name: Patch gdx-jnigen to target native ARM64 instead of x86
+        run: |
+          FILE=buildSrc/src/main/groovy/tool/generator/GenerateLibs.groovy
+
+          OLD='BuildTarget.newDefaultTarget(Os.Linux, Architecture.Bitness._64)'
+          NEW='BuildTarget.newDefaultTarget(Os.Linux, Architecture.Bitness._64, Architecture.ARM)'
+          COUNT=$(grep -c -F "$OLD" "$FILE")
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly one '$OLD' in $FILE, found $COUNT. imgui-java's GenerateLibs.groovy layout changed — update this patch step for ${{ inputs.imgui_java_version }}."
+            exit 1
+          fi
+          sed -i "s|$OLD|$NEW|" "$FILE"
+
+          ANCHOR='requireCpp17(linux64)'
+          COUNT2=$(grep -c -F "$ANCHOR" "$FILE")
+          if [ "$COUNT2" -ne 1 ]; then
+            echo "::error::Expected exactly one '$ANCHOR' in $FILE, found $COUNT2. imgui-java's GenerateLibs.groovy layout changed — update this patch step for ${{ inputs.imgui_java_version }}."
+            exit 1
+          fi
+          sed -i "/${ANCHOR}/a\\
+            linux64.compilerPrefix = ''\\
+            linux64.osFileName = 'linux64'\\
+            linux64.libName = 'libimgui-java64.so'\\
+            linux64.buildFileName = 'build-linux64.xml'" "$FILE"
+
+          echo "--- Patched Linux build target block ---"
+          grep -n -A6 'if (forLinux)' "$FILE"
+
       - name: Build native library
         run: ./gradlew :imgui-binding:generateLibs -Denvs=linux -Dlocal
 
